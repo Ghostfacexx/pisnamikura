@@ -104,6 +104,8 @@ const PAYMENT_MAP_AUTO = envB('PAYMENT_MAP_AUTO', true);
 const PAYMENT_PROVIDER = process.env.PAYMENT_PROVIDER || 'paypal';
 const PAYMENT_TARGET = process.env.PAYMENT_TARGET || '_blank';
 const PAYMENT_PLACEHOLDER = process.env.PAYMENT_PLACEHOLDER || 'paypal:HOSTED_BUTTON_ID_PLACEHOLDER';
+// Also write a SKU-based payment map derived from the catalog (bySku)
+const GENERATE_PAYMENT_MAP_FROM_CATALOG = envB('GENERATE_PAYMENT_MAP_FROM_CATALOG', true);
 // Collected product IDs during capture: id -> { url, title }
 const FOUND_PRODUCT_IDS = new Map();
 /* Product catalog + local SKU registry */
@@ -218,6 +220,10 @@ const COMMERCE_PLATFORM_HINT = process.env.COMMERCE_PLATFORM_HINT || 'opencart';
 /* Optional internal discovery (no external crawler) */
 const DISCOVER_IN_ARCHIVER = envB('DISCOVER_IN_ARCHIVER', false);
 const USE_DISCOVERY_GRAPH = envB('USE_DISCOVERY_GRAPH', true);
+// Prefer using the entire graph (all doc-like nodes) rather than limiting to DISCOVER_MAX_PAGES
+const DISCOVER_USE_GRAPH_FULL = envB('DISCOVER_USE_GRAPH_FULL', false);
+// When selecting nodes from the graph, consider only document-like URLs (no file extensions)
+const GRAPH_DOC_LIKE_ONLY = envB('GRAPH_DOC_LIKE_ONLY', true);
 const DISCOVER_MAX_PAGES = envN('DISCOVER_MAX_PAGES', 50);
 const DISCOVER_MAX_DEPTH = envN('DISCOVER_MAX_DEPTH', 1);
 const DISCOVER_ALLOW_REGEX = process.env.DISCOVER_ALLOW_REGEX || '';
@@ -229,6 +235,9 @@ function isAllowedByDiscover(url){
   const a = DISCOVER_ALLOW_RX ? DISCOVER_ALLOW_RX.test(url) : true;
   const d = DISCOVER_DENY_RX ? !DISCOVER_DENY_RX.test(url) : true;
   return a && d;
+}
+function isDocLikeUrl(u){
+  try { const p = new URL(u).pathname || '/'; return !/\.[a-z0-9]{2,6}$/i.test(p); } catch { return true; }
 }
 
 /* Same-site ENV */
@@ -1396,6 +1405,31 @@ function writeAutoPaymentMap(outDir){
   }
 }
 
+// SKU-based payment map derived from captured catalog; merges into _payment-map.json under bySku
+function writeSkuPaymentMap(outDir){
+  if (!GENERATE_PAYMENT_MAP_FROM_CATALOG) return;
+  if (!ENABLE_CATALOG || !Array.isArray(CATALOG) || !CATALOG.length) return;
+  const file = path.join(outDir, '_payment-map.json');
+  let obj = { provider: PAYMENT_PROVIDER, target: PAYMENT_TARGET, map: {}, bySku: {} };
+  try{
+    if (fs.existsSync(file)){
+      const current = JSON.parse(fs.readFileSync(file,'utf8')) || {};
+      obj.provider = current.provider || obj.provider;
+      obj.target = current.target || obj.target;
+      obj.map = current.map || {};
+      obj.bySku = current.bySku || {};
+    }
+  }catch{}
+  let added = 0;
+  for (const p of CATALOG){
+    const sku = p && p.sku; if (!sku) continue;
+    if (!obj.bySku[sku]){ obj.bySku[sku] = PAYMENT_PLACEHOLDER; added++; }
+  }
+  if (added>0){
+    try { fs.writeFileSync(file, JSON.stringify(obj, null, 2)); console.log('[PAYMENT_MAP_SKU]', 'updated', added, 'entries'); } catch(e){ console.warn('[PAYMENT_MAP_SKU_ERR]', e.message); }
+  }
+}
+
 /* ------------ Main ------------ */
 ;(async()=>{
   const seeds=readSeeds(seedsFile);
@@ -1433,6 +1467,19 @@ function writeAutoPaymentMap(outDir){
           if (!adj.has(from)) adj.set(from, new Set());
           adj.get(from).add(to);
         }
+        // Prefill product IDs from graph nodes (OpenCart/Woo common params)
+        try {
+          for (const u of Object.keys(nodes)) {
+            try {
+              const U = new URL(u);
+              const route = (U.searchParams.get('route')||'').toLowerCase();
+              let pid = '';
+              if (/product\/product/.test(route)) pid = String(U.searchParams.get('product_id')||'');
+              if (!pid) pid = String(U.searchParams.get('add-to-cart')||'');
+              if (pid && !FOUND_PRODUCT_IDS.has(pid)) FOUND_PRODUCT_IDS.set(pid, { url: u, title: '' });
+            } catch {}
+          }
+        } catch {}
         let ordered = [];
         if (start && adj.size) {
           const seen = new Set([start]);
@@ -1454,6 +1501,21 @@ function writeAutoPaymentMap(outDir){
             const db = (nodes[b] && nodes[b].depth)||9999;
             if (da!==db) return da-db; return String(a).localeCompare(String(b));
           }).slice(0, DISCOVER_MAX_PAGES);
+        }
+        // If enabled, rebuild ordered as full set of doc-like nodes sorted by depth then URL
+        if (DISCOVER_USE_GRAPH_FULL) {
+          const all = Object.keys(nodes).filter(u => {
+            if (GRAPH_DOC_LIKE_ONLY && !isDocLikeUrl(u)) return false;
+            try { if (!isSameSite(u)) return false; } catch {}
+            if (DISCOVER_DENY_REGEX && new RegExp(DISCOVER_DENY_REGEX,'i').test(u)) return false;
+            if (DISCOVER_ALLOW_REGEX && !(new RegExp(DISCOVER_ALLOW_REGEX,'i').test(u))) return false;
+            return true;
+          });
+          all.sort((a,b)=>{
+            const da=(nodes[a]?.depth)||9999, db=(nodes[b]?.depth)||9999;
+            if(da!==db) return da-db; return String(a).localeCompare(String(b));
+          });
+          ordered = all;
         }
         try {
           if (PRIMARY_START_URL) {
@@ -1721,6 +1783,8 @@ function writeAutoPaymentMap(outDir){
 
   // Persist catalog + SKU map
   try { saveCatalog(outputRoot); console.log('[CATALOG] entries=', CATALOG.length, 'nextSku=', SKU_MAP.next); } catch {}
+  // Derive/merge SKU-based payment mappings for host-time rewrites
+  try { writeSkuPaymentMap(outputRoot); } catch {}
 
   if(failures.length){
     console.log('Sample failures:');
