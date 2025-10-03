@@ -185,6 +185,15 @@
     // Plan-first mapper: build explicit seed list before archiving
     opts.planFirst          = asBool(id('advPlanFirst'));
 
+    // Planner mode (browser vs classic) and headless/UA
+    opts.planBrowser        = asBool(id('advPlanBrowser'));
+    const planHeadlessSel   = document.getElementById('advPlanHeadless');
+    if (planHeadlessSel) {
+      opts.planBrowserHeadless = (planHeadlessSel.value === 'true');
+    }
+    const planUA = asStr(id('advPlanUA'));
+    if (planUA) opts.planUserAgent = planUA;
+
     const internalRx = asStr(id('advInternalRegex')); if(internalRx) opts.internalRewriteRegex = internalRx;
     const domainFilter = asStr(id('advDomainFilter')); if(domainFilter) opts.domainFilter = domainFilter;
 
@@ -241,6 +250,23 @@
     const startText = (id('planStartUrls').value||'').trim();
     if(!startText){ alert('Enter start URL(s)'); return; }
     const options = buildOptions();
+    // If planner mode not explicitly enabled, offer to enable and choose headless
+    try{
+      if (!options.planBrowser) {
+        const askPlanner = window.confirm('Use browser-based planner (Chromium) for plan build?\n\nOK = Yes (recommended for JS-heavy sites)\nCancel = No (use classic HTTP fetch)');
+        if (askPlanner) {
+          options.planBrowser = true;
+          const askHeadless = window.confirm('Run planner headless?\n\nOK = Headless (no UI)\nCancel = Show browser (headless=false, recommended when debugging or bypassing popups)');
+          options.planBrowserHeadless = askHeadless; // true if OK pressed
+        }
+      }
+    }catch{}
+    // Prompt about planner headless if browser planner is enabled
+    if (options.planBrowser) {
+      const ph = options.planBrowserHeadless ? 'true (headless)' : 'false (shows browser)';
+      const ok = window.confirm(`Plan with browser is enabled. Headless = ${ph}.\nProceed?\n\nTip: Change under Advanced → planner headless.`);
+      if (!ok) return;
+    }
     fetch('/api/plan/build',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ startUrlsText: startText, options }) })
       .then(jsonMaybe).then(j=>{
         if(j && j.ok && j.map){
@@ -347,6 +373,29 @@
     // store first url in recent
     pushRecentSeed(urls[0]);
   const options = buildOptions();
+    // If plan-first selected but planner mode not set, offer to enable planner and choose headless
+    try{
+      if (options.planFirst && !options.planBrowser) {
+        const askPlanner = window.confirm('Plan-first is enabled. Use browser-based planner (Chromium)?\n\nOK = Yes (recommended for JS-heavy sites)\nCancel = No (classic planner)');
+        if (askPlanner) {
+          options.planBrowser = true;
+          const askHeadless = window.confirm('Run planner headless?\n\nOK = Headless (no UI)\nCancel = Show browser (headless=false, recommended)');
+          options.planBrowserHeadless = askHeadless;
+        }
+      }
+    }catch{}
+    // Confirm headless settings for capture and planner (if used)
+    try {
+      const capHeadless = (options.headless===false ? 'false (shows browser)' : 'true (headless)');
+      let msg = `Capture headless = ${capHeadless}.`;
+      if (options.planBrowser) {
+        const ph = options.planBrowserHeadless ? 'true (headless)' : 'false (shows browser)';
+        msg += `\nPlanner (browser) headless = ${ph}.`;
+      }
+      msg += '\n\nProceed?\n\nTip: Change under Advanced settings.';
+      const ok = window.confirm(msg);
+      if (!ok) return;
+    } catch(_){}
     // If planSelected has entries, send as planSeeds to use explicitly
     if(planSelected.length){ options.planSeeds = planSelected.slice(); }
     id('btnStart').disabled=true; id('btnStop').disabled=false;
@@ -370,6 +419,29 @@
     // store first seed
     pushRecentSeed(startUrls.split(/\n/)[0]);
   const options = buildOptions();
+    // If plan-first will be used later in the flow, you can still choose planner now if desired
+    try{
+      if (options.planFirst && !options.planBrowser) {
+        const askPlanner = window.confirm('Plan-first is enabled. Use browser-based planner (Chromium)?\n\nOK = Yes\nCancel = No');
+        if (askPlanner) {
+          options.planBrowser = true;
+          const askHeadless = window.confirm('Run planner headless?\n\nOK = Headless (no UI)\nCancel = Show browser (headless=false)');
+          options.planBrowserHeadless = askHeadless;
+        }
+      }
+    }catch{}
+    // Confirm headless settings for capture and planner (if used)
+    try {
+      const capHeadless = (options.headless===false ? 'false (shows browser)' : 'true (headless)');
+      let msg = `Capture headless = ${capHeadless}.`;
+      if (options.planBrowser) {
+        const ph = options.planBrowserHeadless ? 'true (headless)' : 'false (shows browser)';
+        msg += `\nPlanner (browser) headless = ${ph}.`;
+      }
+      msg += '\n\nProceed? You can adjust these under Advanced.';
+      const ok = window.confirm(msg);
+      if (!ok) return;
+    } catch(_){}
     const crawlOptions = {
       maxDepth:   asNum(id('crawlDepth'),3),
       maxPages:   asNum(id('crawlMaxPages'),200),
